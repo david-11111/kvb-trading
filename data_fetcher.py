@@ -74,6 +74,10 @@ class DataFetcher:
         self._attached_over_cdp = False
         self._positions_tab_ok_until: float = 0.0
         self._last_positions_tab_click_ts: float = 0.0
+        self._positions_tab_backoff_until: float = 0.0
+        self._positions_tab_backoff_sec: float = 0.0
+        self._cached_positions: List[Dict] = []
+        self._cached_positions_ts: float = 0.0
 
         # 数据缓存
         self._price_history: List[PriceData] = []
@@ -113,18 +117,22 @@ class DataFetcher:
         now_ts = time.time()
         if self._positions_tab_ok_until and now_ts < self._positions_tab_ok_until:
             return True
+        if self._positions_tab_backoff_until and now_ts < self._positions_tab_backoff_until:
+            return False
         for rows_sel in [".fmui-table-wrapper tbody tr", "tbody tr", "table tr", "[role='row']"]:
             try:
                 rows = self.page.locator(rows_sel)
                 cnt = await rows.count()
                 if cnt >= 2 and await rows.first.is_visible():
-                    self._positions_tab_ok_until = now_ts + 5.0
+                    self._positions_tab_ok_until = now_ts + 15.0
+                    self._positions_tab_backoff_until = 0.0
+                    self._positions_tab_backoff_sec = 0.0
                     return True
             except Exception:
                 continue
 
         # Debounce repeated clicking (prevents rapid tab switching when callers poll frequently).
-        if self._last_positions_tab_click_ts and (now_ts - self._last_positions_tab_click_ts) < 2.0:
+        if self._last_positions_tab_click_ts and (now_ts - self._last_positions_tab_click_ts) < 8.0:
             return False
 
         candidates = [
@@ -141,6 +149,21 @@ class DataFetcher:
                 try:
                     el = await self.page.query_selector(sel)
                     if el and await el.is_visible():
+                        # If it's already selected/active, don't click it again.
+                        try:
+                            aria_selected = await el.get_attribute("aria-selected")
+                        except Exception:
+                            aria_selected = None
+                        try:
+                            cls = await el.get_attribute("class") or ""
+                        except Exception:
+                            cls = ""
+                        cls_l = (cls or "").lower()
+                        if (aria_selected or "").lower() == "true" or ("active" in cls_l) or ("selected" in cls_l):
+                            self._positions_tab_ok_until = time.time() + 15.0
+                            self._positions_tab_backoff_until = 0.0
+                            self._positions_tab_backoff_sec = 0.0
+                            return True
                         self._last_positions_tab_click_ts = now_ts
                         try:
                             await el.click(timeout=1000)
@@ -156,12 +179,19 @@ class DataFetcher:
                 try:
                     rows = self.page.locator(rows_sel)
                     if (await rows.count()) >= 2 and await rows.first.is_visible():
-                        self._positions_tab_ok_until = time.time() + 8.0
+                        self._positions_tab_ok_until = time.time() + 20.0
+                        self._positions_tab_backoff_until = 0.0
+                        self._positions_tab_backoff_sec = 0.0
                         return True
                 except Exception:
                     continue
         except Exception:
             return False
+
+        # If we clicked but still can't see the table, back off to avoid flicker.
+        if clicked:
+            self._positions_tab_backoff_sec = min(60.0, max(4.0, (self._positions_tab_backoff_sec or 0.0) * 2.0 or 4.0))
+            self._positions_tab_backoff_until = time.time() + self._positions_tab_backoff_sec
         return clicked
 
     async def _scroll_row_actions_into_view(self, row) -> dict:
@@ -719,6 +749,11 @@ class DataFetcher:
         if not self.is_connected or not self.page:
             return []
 
+        now_ts = time.time()
+        # Throttle frequent reads; positions parsing is heavy and it triggers ensure_positions_tab().
+        if self._cached_positions_ts and (now_ts - self._cached_positions_ts) < 3.0:
+            return list(self._cached_positions or [])
+
         positions = []
         seen_keys = set()
 
@@ -794,6 +829,8 @@ class DataFetcher:
             self.logger.info(f"共检测到 {len(positions)} 个持仓")
             # 保存到文件供仪表板读取
             self._save_platform_positions(positions)
+        self._cached_positions = list(positions or [])
+        self._cached_positions_ts = time.time()
         return positions
 
     def _save_platform_positions(self, positions: List[Dict]):
