@@ -16,6 +16,9 @@ Write-Host ""
 # 切换到脚本目录
 Set-Location $PSScriptRoot
 
+# Avoid pycache write issues under restrictive ACLs; caches go to %TEMP% instead of repo folder.
+$env:PYTHONPYCACHEPREFIX = Join-Path $env:TEMP "pycache_smart_trading"
+
 # 检查并安装依赖
 Write-Host "[1/3] 检查依赖..." -ForegroundColor Yellow
 

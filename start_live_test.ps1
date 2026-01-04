@@ -28,6 +28,9 @@ if (-not $env:SMART_TRADING_CDP_URL) {
   $env:SMART_TRADING_CDP_URL = "http://localhost:9222"
 }
 
+# Avoid pycache write issues under restrictive ACLs; caches go to %TEMP% instead of repo folder.
+$env:PYTHONPYCACHEPREFIX = Join-Path $env:TEMP "pycache_smart_trading"
+
 # Safety toggles for live mode
 $env:SMART_TRADING_ALLOW_LIVE_OPEN = "0"
 $env:SMART_TRADING_ALLOW_LIVE_CLOSE = "1"
@@ -43,4 +46,3 @@ Write-Host "Delete STOP_TRADING to allow CLOSE clicks." -ForegroundColor Yellow
 Write-Host ""
 
 python .\auto_trader.py --live --no-auto --symbols $Symbol --interval $IntervalSec
-

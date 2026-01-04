@@ -209,53 +209,132 @@ class AutoTrader:
             return False
 
         self.logger.info(f"尝试点击确认按钮: {preferred_text}")
-        # 支持多种元素类型和文本
-        candidates = [
-            # 精确匹配优先
-            f'button:has-text("{preferred_text}")',
-            f'div:has-text("{preferred_text}")',
-            f'span:has-text("{preferred_text}")',
-            f'[role="button"]:has-text("{preferred_text}")',
-            # 通用确认文本
-            'button:has-text("市价买入")',
-            'button:has-text("市价卖出")',
-            'button:has-text("市价")',
-            'button:has-text("确认")',
-            'button:has-text("确定")',
-            # div/span 元素（KVB页面可能用自定义元素）
-            'div:has-text("市价买入")',
-            'div:has-text("市价卖出")',
-            'div:has-text("确认")',
-            'div:has-text("确定")',
-            '[role="button"]:has-text("市价")',
-            '[role="button"]:has-text("确认")',
-            # 类名匹配
-            '.confirm-button',
-            '.btn-confirm',
-            '.btn-primary',
-            '.order-button',
-            '.trade-button',
-            # 包含 buy/sell 的按钮
-            '[class*="buy"]',
-            '[class*="sell"]',
-            '[class*="confirm"]',
-            # 英文后备
-            'button:has-text("OK")',
-            'button:has-text("Confirm")',
-        ]
-        for sel in candidates:
+
+        # Notes:
+        # - 确认按钮通常出现在订单弹窗/对话框中。直接在全页面找 `.order-button` 等过于宽泛，容易误点买/卖按钮导致重复开仓。
+        # - Playwright 的 locator + retry + 关闭弹窗检测，比单次 query_selector 更稳。
+
+        import asyncio
+
+        preferred_text = (preferred_text or "").strip()
+        texts = [t for t in [
+            preferred_text,
+            "市价买入",
+            "市价卖出",
+            "市价",
+            "确认",
+            "确定",
+            "OK",
+            "Confirm",
+        ] if t]
+
+        cancel_words = ("取消", "关闭", "返回", "Cancel", "Close", "No")
+
+        async def dialog_visible() -> bool:
+            return await self._trade_dialog_visible()
+
+        async def click_and_confirm(loc, desc: str) -> bool:
             try:
-                btn = await page.query_selector(sel)
-                if btn:
-                    visible = await btn.is_visible()
-                    if visible:
-                        await btn.click()
-                        self.logger.info(f"已点击确认按钮: {sel}")
+                if (await loc.count()) <= 0:
+                    return False
+                el = loc.first
+                if not await el.is_visible():
+                    return False
+                try:
+                    await el.scroll_into_view_if_needed(timeout=800)
+                except Exception:
+                    pass
+                try:
+                    await el.click(timeout=1200)
+                except Exception:
+                    try:
+                        await el.click(force=True, timeout=1200)
+                    except Exception as e:
+                        self.logger.debug(f"确认点击失败({desc}): {e}")
+                        return False
+
+                # 点击后等待弹窗消失（如果一键交易没有弹窗，外层会绕过 _click_confirm）
+                for _ in range(10):
+                    await asyncio.sleep(0.15)
+                    if not await dialog_visible():
+                        self.logger.info(f"确认按钮点击成功: {desc}")
                         return True
+                # 弹窗可能仍在，但也可能已提交、UI卡住；留给后续 verify_open_after_trade 来兜底。
+                self.logger.info(f"已点击确认({desc})，但弹窗未在预期时间内消失")
+                return True
             except Exception as e:
-                self.logger.debug(f"按钮 {sel} 点击失败: {e}")
+                self.logger.debug(f"确认点击异常({desc}): {e}")
+                return False
+
+        # 1) 优先在对话框容器内点击（减少误点）
+        dialog_selectors = [
+            "[role='dialog']",
+            ".order-dialog, .order-modal, .trade-modal, .order-ticket, .trade-ticket, .order-panel, .trade-panel",
+            ".ant-modal, .modal, .dialog, .MuiDialog-root",
+        ]
+        for scope_sel in dialog_selectors:
+            try:
+                scope = page.locator(scope_sel).first
+                if (await scope.count()) <= 0 or (not await scope.is_visible()):
+                    continue
+
+                for t in texts:
+                    # 先精确匹配按钮文本
+                    if await click_and_confirm(scope.locator(f'button:has-text("{t}")'), f"{scope_sel}/button:{t}"):
+                        return True
+                    if await click_and_confirm(scope.locator(f'[role=\"button\"]:has-text(\"{t}\")'), f"{scope_sel}/rolebtn:{t}"):
+                        return True
+                    # 某些版本用 div/span 承载点击
+                    if await click_and_confirm(scope.locator(f'div:has-text("{t}")'), f"{scope_sel}/div:{t}"):
+                        return True
+
+                # 兜底：在对话框内找 “primary/confirm” 类按钮（仍保持在 scope 内，避免误点全局买卖按钮）
+                primary = scope.locator("button.btn-primary, button.primary, button:has([class*='primary']), [role='button'][class*='primary'], [class*='confirm']")
+                if await click_and_confirm(primary, f"{scope_sel}/primary"):
+                    return True
+
+                # 最后兜底：取对话框内最后一个可见按钮（跳过取消类）
+                buttons = scope.locator("button, [role='button']")
+                try:
+                    cnt = await buttons.count()
+                except Exception:
+                    cnt = 0
+                for i in range(min(cnt, 12) - 1, -1, -1):
+                    el = buttons.nth(i)
+                    try:
+                        if not await el.is_visible():
+                            continue
+                        label = (await el.inner_text()).strip()
+                        if any(w in label for w in cancel_words):
+                            continue
+                        if await click_and_confirm(el, f"{scope_sel}/fallback_last:{label}"):
+                            return True
+                    except Exception:
+                        continue
+            except Exception:
                 continue
-        self.logger.warning(f"未找到确认按钮")
+
+        # 2) 如果没找到对话框容器：回退到全局按文本点击（仍只点“确认/市价”类按钮）
+        for t in texts:
+            for sel in [f'button:has-text("{t}")', f'[role="button"]:has-text("{t}")']:
+                try:
+                    if await click_and_confirm(page.locator(sel), f"global:{sel}"):
+                        return True
+                except Exception:
+                    continue
+
+        # 3) 最后：键盘回车（很多弹窗默认确认按钮为主按钮）
+        try:
+            await page.keyboard.press("Enter")
+            for _ in range(10):
+                await asyncio.sleep(0.15)
+                if not await dialog_visible():
+                    self.logger.info("确认按钮回退策略：Enter 生效，弹窗已关闭")
+                    return True
+        except Exception as e:
+            self.logger.debug(f"确认按钮回退策略 Enter 失败: {e}")
+
+        self.logger.warning("未找到确认按钮/确认未生效")
         return False
 
     async def _trade_dialog_visible(self) -> bool:
@@ -266,7 +345,21 @@ class AutoTrader:
         page = getattr(self.fetcher, "page", None)
         if not page:
             return False
-        selectors = [
+        # Prefer “dialog-like” containers first; they reduce false positives on the main page.
+        for scope_sel in [
+            "[role='dialog']",
+            ".order-dialog, .order-modal, .trade-modal, .order-ticket, .trade-ticket, .order-panel, .trade-panel",
+            ".ant-modal, .modal, .dialog, .MuiDialog-root",
+        ]:
+            try:
+                scope = page.locator(scope_sel).first
+                if (await scope.count()) > 0 and await scope.is_visible():
+                    return True
+            except Exception:
+                continue
+
+        # Fallback: key texts/buttons.
+        for sel in [
             "text=新订单",
             "text=市价执行",
             "text=Market Execution",
@@ -275,11 +368,12 @@ class AutoTrader:
             "button:has-text('市价')",
             "button:has-text('确认')",
             "button:has-text('确定')",
-        ]
-        for sel in selectors:
+            "[role='button']:has-text('确认')",
+            "[role='button']:has-text('确定')",
+        ]:
             try:
-                el = await page.query_selector(sel)
-                if el and await el.is_visible():
+                el = page.locator(sel).first
+                if (await el.count()) > 0 and await el.is_visible():
                     return True
             except Exception:
                 continue
@@ -1057,7 +1151,7 @@ class AutoTrader:
                 if not ok:
                     return False
                 await asyncio.sleep(0.4)
-                if await self._trade_dialog_visible():
+                if bool(self.exec_config.get("require_confirm", True)) and await self._trade_dialog_visible():
                     ok = await self._click_confirm("市价买入" if direction == "long" else "市价卖出")
                     await asyncio.sleep(0.8)
                 if not ok:
@@ -1237,6 +1331,7 @@ class AutoTrader:
 
             if self.live_trade:
                 before_count = await self._count_platform_positions(symbol)
+                require_confirm = bool(self.exec_config.get("require_confirm", True))
                 # 如果已经通过列表交易下单，跳过主界面下单（避免重复开仓）
                 if used_list_trade:
                     self.logger.info(f"已通过列表快速交易下单，跳过主界面下单")
@@ -1245,7 +1340,7 @@ class AutoTrader:
                     lot_set_ok = await self.fetcher.set_lot_size(lot_size)
                     lot_value_after_set = getattr(self.fetcher, "last_lot_value", "") or ""
                     await asyncio.sleep(0.2)
-                    if await self._trade_dialog_visible():
+                    if require_confirm and await self._trade_dialog_visible():
                         confirm_ok = await self._click_confirm("市价买入")
                     else:
                         confirm_ok = True
@@ -1277,7 +1372,7 @@ class AutoTrader:
                                 ))
                                 return False
                         await asyncio.sleep(0.3)
-                        if await self._trade_dialog_visible():
+                        if require_confirm and await self._trade_dialog_visible():
                             confirm_ok = await self._click_confirm("市价买入")
                             await asyncio.sleep(1)
                             if confirm_ok:
@@ -1300,6 +1395,7 @@ class AutoTrader:
 
             if self.live_trade:
                 before_count = await self._count_platform_positions(symbol)
+                require_confirm = bool(self.exec_config.get("require_confirm", True))
                 # 如果已经通过列表交易下单，跳过主界面下单（避免重复开仓）
                 if used_list_trade:
                     self.logger.info(f"已通过列表快速交易下单，跳过主界面下单")
@@ -1307,7 +1403,7 @@ class AutoTrader:
                     lot_set_ok = await self.fetcher.set_lot_size(lot_size)
                     lot_value_after_set = getattr(self.fetcher, "last_lot_value", "") or ""
                     await asyncio.sleep(0.2)
-                    if await self._trade_dialog_visible():
+                    if require_confirm and await self._trade_dialog_visible():
                         confirm_ok = await self._click_confirm("市价卖出")
                     else:
                         confirm_ok = True
@@ -1339,7 +1435,7 @@ class AutoTrader:
                                 ))
                                 return False
                         await asyncio.sleep(0.3)
-                        if await self._trade_dialog_visible():
+                        if require_confirm and await self._trade_dialog_visible():
                             confirm_ok = await self._click_confirm("市价卖出")
                             await asyncio.sleep(1)
                             if confirm_ok:
@@ -1893,7 +1989,7 @@ class AutoTrader:
 
         # 点击确认
         if self.live_trade:
-            if await self._trade_dialog_visible():
+            if bool(self.exec_config.get("require_confirm", True)) and await self._trade_dialog_visible():
                 await self._click_confirm("市价")
                 await asyncio.sleep(1)
 
@@ -2025,7 +2121,7 @@ class AutoTrader:
                             continue
                         # 使用fetcher直接平仓（不依赖系统追踪的持仓）
                         success = await self.fetcher.close_position_by_symbol(symbol)
-                        if success and self.live_trade and await self._trade_dialog_visible():
+                        if success and self.live_trade and bool(self.exec_config.get("require_confirm", True)) and await self._trade_dialog_visible():
                             await self._click_confirm("市价")
                             await asyncio.sleep(0.8)
                         if success and self.live_trade and bool(self.exec_config.get("verify_close_after_trade", True)):
@@ -2073,7 +2169,7 @@ class AutoTrader:
                         updated = True
                         continue
                     closed = await self.fetcher.close_all_positions()
-                    if self.live_trade and await self._trade_dialog_visible():
+                    if self.live_trade and bool(self.exec_config.get("require_confirm", True)) and await self._trade_dialog_visible():
                         # Some UIs may require repeated confirms; click once as best-effort.
                         await self._click_confirm("市价")
                         await asyncio.sleep(0.8)
