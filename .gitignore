@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Local data / logs
+trade_data/
+logs/
+monitor_data/
+evolution_data/
+
+# Browser profiles / automation artifacts
+browser_data/
+browser_data_new/
+cdp_profile/
+quark_cdp_profile/
+
+# Large assets / snapshots (keep out of VCS by default)
+*.png
+trade_page.html
+
+# Local stop/flags
+STOP_TRADING
+trade_data/STOP_TRADING
+
+# OS/editor
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Misc
+nul
