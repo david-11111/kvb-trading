@@ -72,6 +72,8 @@ class DataFetcher:
         self.last_lot_value: Optional[str] = None
         self.is_connected = False
         self._attached_over_cdp = False
+        self._positions_tab_ok_until: float = 0.0
+        self._last_positions_tab_click_ts: float = 0.0
 
         # 数据缓存
         self._price_history: List[PriceData] = []
@@ -107,6 +109,24 @@ class DataFetcher:
         if not self.is_connected or not self.page:
             return False
 
+        # If positions rows are already visible, do not click the tab again (prevents UI flicker).
+        now_ts = time.time()
+        if self._positions_tab_ok_until and now_ts < self._positions_tab_ok_until:
+            return True
+        for rows_sel in [".fmui-table-wrapper tbody tr", "tbody tr", "table tr", "[role='row']"]:
+            try:
+                rows = self.page.locator(rows_sel)
+                cnt = await rows.count()
+                if cnt >= 2 and await rows.first.is_visible():
+                    self._positions_tab_ok_until = now_ts + 5.0
+                    return True
+            except Exception:
+                continue
+
+        # Debounce repeated clicking (prevents rapid tab switching when callers poll frequently).
+        if self._last_positions_tab_click_ts and (now_ts - self._last_positions_tab_click_ts) < 2.0:
+            return False
+
         candidates = [
             "text=持仓",
             "button:has-text('持仓')",
@@ -121,6 +141,7 @@ class DataFetcher:
                 try:
                     el = await self.page.query_selector(sel)
                     if el and await el.is_visible():
+                        self._last_positions_tab_click_ts = now_ts
                         try:
                             await el.click(timeout=1000)
                         except Exception:
@@ -131,10 +152,11 @@ class DataFetcher:
                 except Exception:
                     continue
             # If a table exists with rows beyond header, consider it “ready”.
-            for rows_sel in ["tbody tr", "table tr", "[role='row']"]:
+            for rows_sel in [".fmui-table-wrapper tbody tr", "tbody tr", "table tr", "[role='row']"]:
                 try:
-                    rows = await self.page.query_selector_all(rows_sel)
-                    if rows and len(rows) >= 2:
+                    rows = self.page.locator(rows_sel)
+                    if (await rows.count()) >= 2 and await rows.first.is_visible():
+                        self._positions_tab_ok_until = time.time() + 8.0
                         return True
                 except Exception:
                     continue

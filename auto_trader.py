@@ -121,6 +121,9 @@ class AutoTrader:
         allow_close = _env_bool("SMART_TRADING_ALLOW_LIVE_CLOSE")
         if allow_close is not None:
             self.exec_config["allow_live_close"] = bool(allow_close)
+        require_confirm = _env_bool("SMART_TRADING_REQUIRE_CONFIRM")
+        if require_confirm is not None:
+            self.exec_config["require_confirm"] = bool(require_confirm)
 
         # 数据获取器
         if headless is None:
