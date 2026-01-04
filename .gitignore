@@ -14,6 +14,7 @@ browser_data/
 browser_data_new/
 cdp_profile/
 quark_cdp_profile/
+edge_cdp_profile/
 
 # Large assets / snapshots (keep out of VCS by default)
 *.png
